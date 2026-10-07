@@ -20,7 +20,9 @@ For an existing Guard key, take the short path:
 4. Test allowed, blocked, modified, flagged, and unavailable outcomes at each
    requested screening point.
 
-Use [scripts/guard.py](scripts/guard.py) as a runnable Python starting point;
+For Python integrations, consider the
+[SIF Python SDK](https://github.com/unicitynetwork/sif/tree/335c8525c61b3f8a3276096907d87a83bf549b29/sdk-wrappers/python)
+first. Use [scripts/guard.py](scripts/guard.py) as a dependency-free fallback;
 [the example guide](references/python-example.md) explains configuration,
 application wiring, and offline tests. Read it when using or adapting the helper.
 No management password is needed for this path.
@@ -88,13 +90,15 @@ Send `POST /api/v1/guard` with `Content-Type: application/json` and
 {
   "policy_id": "<SIF_POLICY_ID>",
   "messages": [{"role":"user","content":"<text to check>"}],
-  "config": {"return_detections":true}
+  "config": {"return_detections":false}
 }
 ```
 
 Message roles are `user`, `assistant`, `system`, and `tool`. Send the relevant
 text with its actual role; an HTTP call does not automatically screen other
 messages in the agent's conversation.
+Enable `return_detections` only when the application needs detection details;
+these may contain submitted content and must not be dumped into logs.
 
 Two key configurations exist:
 
@@ -127,11 +131,21 @@ the replacement, as the Python example does. If a multi-message request returns
 `modify`, stop unless the application has a defined way to consume the combined
 replacement safely; never copy it into every message or forward the originals.
 
+Normalization collapses whitespace runs and newlines to one space, trims text,
+and strips zero-width characters. Replacements may break whitespace-sensitive
+tool results such as YAML, Python source, or Markdown tables; validate them
+before use. The Python helper requires explicit `on_modify` approval.
+
 Treat network errors, non-2xx responses, malformed responses, and
 `degraded: true` as unsuccessful verification, not a clean allow. For an agent
 integration, stop the protected operation unless the user explicitly authorizes
 a different failure behavior. Do not automatically replay a timed-out Guard
 POST: the server may already have processed it.
+
+Honor block verdicts even when degraded. The helper offers an explicit
+`on_degraded` callback for authorized alternative failure behavior. Monitor
+rollouts need an `on_flag` handler that permits only flags whose
+`reason.escalation` is `monitored`; see the example guide.
 
 Identify the screening points requested for the application before editing it:
 

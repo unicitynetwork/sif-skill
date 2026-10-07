@@ -1,6 +1,10 @@
 # Runnable Python Guard example
 
-Use [scripts/guard.py](../scripts/guard.py) when adding a synchronous,
+For Python integrations, first consider SIF's
+[Python SDK](https://github.com/unicitynetwork/sif/tree/335c8525c61b3f8a3276096907d87a83bf549b29/sdk-wrappers/python).
+Apply the complete Guard verdict rather than relying on a convenience flag
+predicate: the SDK's `is_flagged` also includes `modify`.
+Use [scripts/guard.py](../scripts/guard.py) as the dependency-free fallback for a synchronous,
 one-message screening point to a Python application. It uses Python 3.9+ and
 only the standard library. It is an integration example, not an SDK or a
 background interceptor. Async applications should adapt the transport or run
@@ -15,7 +19,7 @@ into shell commands, chat, or tracked files.
 | Variable | Example behavior |
 |---|---|
 | `SIF_API_KEY` | Required Guard secret; never a management session token |
-| `SIF_BASE_URL` | Defaults to `https://sif.unicity.network`; origin only, no path/query/credentials |
+| `SIF_BASE_URL` | Defaults to `https://sif.unicity.network`; optional proxy path prefix, no query/fragment/credentials |
 | `SIF_KEY_MODE` | Client option: `caller-selected` (default) or `class-bound` |
 | `SIF_POLICY_ID` | Required for caller-selected; unset for class-bound |
 | `SIF_TIMEOUT_SECONDS` | Client socket timeout, default `10`; must be finite and positive |
@@ -36,12 +40,17 @@ printf '%s' 'Synthetic onboarding sample' | python3 -B scripts/guard.py
 
 The CLI sends a real Guard request. On `allow` or valid `modify`, stdout contains
 only `request_id` and `action`; it never prints content, replacement text, or
-credentials. Exit codes are `0` for permitted content, `1` for configuration or
+credentials. Exit codes are `0` for unchanged allowed content, `4` for modified
+content (the original must not be forwarded), `1` for configuration or
 verification failure, `2` for blocked content, and `3` for a flag requiring
 application review. No downstream action occurs in this CLI. A flag is a valid
 Guard decision; exit `3` represents the example's lack of a review handler, not
 a service outage or a block verdict. Audit verification remains a separate
 management step described in the skill.
+
+Do not gate forwarding the original text on exit `4`. Use the Python API to
+approve and consume replacements. The CLI only reports that a valid replacement
+exists; it performs no forwarding.
 
 For a local semanticd instance, explicitly set `SIF_BASE_URL` to
 `http://127.0.0.1:<configured-port>` or `http://[::1]:<configured-port>` and set
@@ -72,10 +81,35 @@ def display_model_output(text, output_handler):
 
 Each next handler receives exactly one string: the original on `allow`, or
 `modified_content` on `modify` (an empty replacement is valid). A block raises
-`GuardBlocked`; degraded/malformed/non-2xx/network failures raise
+`GuardBlocked`, including degraded fail-closed blocks; other degraded/malformed/non-2xx/network failures raise
 `GuardUnavailable`. Catch these at the application boundary to show an error or
 refusal, without invoking the original handler or falling back to unscreened
 text. Errors raised by the next handler itself are not retried.
+
+By default `modify` also raises `GuardReviewRequired`. Supply
+`on_modify=your_replacement_validator`; it receives the verdict and must return
+exactly `True` before the replacement is forwarded. For plain text, explicitly
+approve redaction when appropriate. For tool calls, parse `modified_content`,
+validate schema and permissions, and execute only those validated arguments.
+Never approve arbitrary tool replacements unconditionally.
+
+SIF replacements collapse whitespace runs (including newlines) to one space,
+trim surrounding whitespace, and strip zero-width characters. A redacted YAML
+document, Python program, or Markdown table may therefore lose its structure.
+Do not consume replacements as whitespace-sensitive source or structured data
+without validation.
+
+To honor an explicitly authorized fail-open policy, supply `on_degraded`;
+it receives the verdict and must return exactly `True`. Blocks are always
+honored before this callback, and normal flag/modify approval is still required.
+`GuardUnavailable.status` preserves HTTP status. `.error_code` retains recognized
+`PolicyRequired` / `PolicyIsClassLed` codes, and `.retry_after` retains the
+`Retry-After` header. No response body is included in the exception. Respect
+rate limits without automatically replaying a POST.
+
+Detections are off by default; set `return_detections=True` on `GuardClient`
+only when required. Responses are limited to 1 MiB. The TLS context is reused,
+but each request uses a fresh connection and handshake.
 
 For `flag`, supply `on_flag=your_review_handler`. It receives the verdict,
 must implement the application's agreed warning/review behavior, and must
@@ -84,6 +118,23 @@ value raises `GuardReviewRequired`. Do not add an unconditional `True` callback
 just to make the example pass. Do not dump verdicts to logs: detections can
 contain submitted content. `guard.screen(...)` exposes permitted `.content`,
 `.request_id`, and `.action` when a callback-based next handler is inconvenient.
+
+Monitor mode returns `flag` with `reason.escalation == "monitored"`. The helper
+still requires an explicit handler. For an approved monitor rollout:
+
+```python
+def on_monitor_flag(verdict):
+    reason = verdict.get("reason")
+    if not isinstance(reason, dict) or reason.get("escalation") != "monitored":
+        return False
+    record_monitor_event(verdict["request_id"])  # Your metadata-only audit hook.
+    return True
+
+def send_monitored_message(text, model_handler):
+    return guard.screen_then(text, model_handler, on_flag=on_monitor_flag)
+```
+
+Ordinary flags still pause; do not use a blanket approval callback.
 
 One message per request avoids pretending that SIF's combined replacement is
 a role-preserving list of messages. The helper does not parse modified tool

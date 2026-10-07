@@ -163,6 +163,10 @@ assuming every matching rule automatically blocks content.
 `fail_mode` (`open`/`closed`) is error handling. `mode`
 (`off`/`monitor`/`enforce`) is rollout behavior. Monitor mode is not evidence
 that a matching request will be blocked: it permits traffic.
+On the wire, monitored matches are `flag` with `reason.escalation: "monitored"`.
+The Python helper pauses flags by default, so a monitor rollout must supply
+an explicit `on_flag` handler that records a metadata-only event and returns
+`True` for monitored flags. See [the wiring example](python-example.md).
 
 5. PATCH this new policy with `{"mode":"enforce"}` to stage an enforcing
 version. Read `latest_version`, then preview that exact version:
